@@ -45,7 +45,7 @@
 
   <DisableEntityHighlighting>false</DisableEntityHighlighting>
 
-  <!-- VersionOverrides: кнопка на панели + pinning -->
+  <!-- VersionOverrides: кнопка на панели -->
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
                     xsi:type="VersionOverridesV1_0">
 
@@ -77,7 +77,6 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <SourceLocation resid="taskpaneUrl"/>
-                    <SupportsPinning>true</SupportsPinning>
                   </Action>
                 </Control>
               </Group>
@@ -102,7 +101,6 @@
                   </Icon>
                   <Action xsi:type="ShowTaskpane">
                     <SourceLocation resid="taskpaneUrl"/>
-                    <SupportsPinning>true</SupportsPinning>
                   </Action>
                 </Control>
               </Group>
