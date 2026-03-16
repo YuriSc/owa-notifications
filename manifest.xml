@@ -27,8 +27,7 @@
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
-        <!-- ЗАМЕНИ НА СВОЙ GitHub Pages URL -->
-        <SourceLocation DefaultValue="https://USERNAME.github.io/REPO/taskpane.html"/>
+        <SourceLocation DefaultValue="https://yurisc.github.io/owa-notifications/taskpane.html"/>
         <RequestedHeight>250</RequestedHeight>
       </DesktopSettings>
     </Form>
