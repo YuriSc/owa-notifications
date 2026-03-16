@@ -7,11 +7,13 @@
   xsi:type="MailApp">
 
   <Id>12345678-1234-1234-1234-123456789012</Id>
-  <Version>1.0.0</Version>
+  <Version>1.1.0</Version>
   <ProviderName>MyNotifier</ProviderName>
   <DefaultLocale>ru-RU</DefaultLocale>
   <DisplayName DefaultValue="OWA Notifier"/>
   <Description DefaultValue="Браузерные уведомления о новых письмах и событиях календаря"/>
+  <IconUrl DefaultValue="https://yurisc.github.io/owa-notifications/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="https://yurisc.github.io/owa-notifications/icon-128.png"/>
 
   <Hosts>
     <Host Name="Mailbox"/>
@@ -19,11 +21,11 @@
 
   <Requirements>
     <Sets>
-      <Set Name="Mailbox" MinVersion="1.1"/>
+      <Set Name="Mailbox" MinVersion="1.5"/>
     </Sets>
   </Requirements>
 
-  <!-- Taskpane при чтении письма (точка входа для активации add-in) -->
+  <!-- Fallback для старых клиентов без VersionOverrides -->
   <FormSettings>
     <Form xsi:type="ItemRead">
       <DesktopSettings>
@@ -35,11 +37,100 @@
 
   <Permissions>ReadItem</Permissions>
 
-  <!-- Активируется на любом письме -->
+  <!-- Активируется на письмах И встречах -->
   <Rule xsi:type="RuleCollection" Mode="Or">
     <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read"/>
+    <Rule xsi:type="ItemIs" ItemType="Appointment" FormType="Read"/>
   </Rule>
 
   <DisableEntityHighlighting>false</DisableEntityHighlighting>
+
+  <!-- VersionOverrides: кнопка на панели + pinning -->
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides"
+                    xsi:type="VersionOverridesV1_0">
+
+    <Requirements>
+      <bt:Sets>
+        <bt:Set Name="Mailbox" MinVersion="1.5"/>
+      </bt:Sets>
+    </Requirements>
+
+    <Hosts>
+      <Host xsi:type="MailHost">
+        <DesktopFormFactor>
+
+          <!-- Кнопка при чтении письма -->
+          <ExtensionPoint xsi:type="MessageReadCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="msgReadGroup">
+                <Label resid="groupLabel"/>
+                <Control xsi:type="Button" id="msgReadBtn">
+                  <Label resid="btnLabel"/>
+                  <Supertip>
+                    <Title resid="btnLabel"/>
+                    <Description resid="btnDesc"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="icon16"/>
+                    <bt:Image size="32" resid="icon32"/>
+                    <bt:Image size="80" resid="icon80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="taskpaneUrl"/>
+                    <SupportsPinning>true</SupportsPinning>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+
+          <!-- Кнопка при просмотре встречи/события календаря -->
+          <ExtensionPoint xsi:type="AppointmentAttendeeCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="apptReadGroup">
+                <Label resid="groupLabel"/>
+                <Control xsi:type="Button" id="apptReadBtn">
+                  <Label resid="btnLabel"/>
+                  <Supertip>
+                    <Title resid="btnLabel"/>
+                    <Description resid="btnDesc"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="icon16"/>
+                    <bt:Image size="32" resid="icon32"/>
+                    <bt:Image size="80" resid="icon80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <SourceLocation resid="taskpaneUrl"/>
+                    <SupportsPinning>true</SupportsPinning>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="icon16" DefaultValue="https://yurisc.github.io/owa-notifications/icon-16.png"/>
+        <bt:Image id="icon32" DefaultValue="https://yurisc.github.io/owa-notifications/icon-32.png"/>
+        <bt:Image id="icon80" DefaultValue="https://yurisc.github.io/owa-notifications/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="taskpaneUrl" DefaultValue="https://yurisc.github.io/owa-notifications/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="groupLabel" DefaultValue="Notifier"/>
+        <bt:String id="btnLabel" DefaultValue="OWA Notifier"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="btnDesc" DefaultValue="Мониторинг новых писем с браузерными уведомлениями"/>
+      </bt:LongStrings>
+    </Resources>
+
+  </VersionOverrides>
 
 </OfficeApp>
