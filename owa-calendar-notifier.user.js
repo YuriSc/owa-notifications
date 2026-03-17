@@ -375,19 +375,52 @@
     updateNotifButton();
   }
 
+  // ─── определение таймзоны (IANA → Windows) ─────────────────────────────
+  function getWindowsTimeZone() {
+    const map = {
+      'Europe/Moscow': 'Russian Standard Time',
+      'Europe/Kaliningrad': 'Kaliningrad Standard Time',
+      'Europe/Samara': 'Russia Time Zone 3',
+      'Asia/Yekaterinburg': 'Ekaterinburg Standard Time',
+      'Asia/Omsk': 'Omsk Standard Time',
+      'Asia/Novosibirsk': 'N. Central Asia Standard Time',
+      'Asia/Barnaul': 'Altai Standard Time',
+      'Asia/Krasnoyarsk': 'North Asia Standard Time',
+      'Asia/Irkutsk': 'North Asia East Standard Time',
+      'Asia/Yakutsk': 'Yakutsk Standard Time',
+      'Asia/Vladivostok': 'Vladivostok Standard Time',
+      'Asia/Magadan': 'Magadan Standard Time',
+      'Asia/Kamchatka': 'Russia Time Zone 11',
+      'Europe/London': 'GMT Standard Time',
+      'Europe/Berlin': 'W. Europe Standard Time',
+      'America/New_York': 'Eastern Standard Time',
+      'America/Chicago': 'Central Standard Time',
+      'America/Los_Angeles': 'Pacific Standard Time',
+      'Asia/Tokyo': 'Tokyo Standard Time',
+      'Asia/Shanghai': 'China Standard Time',
+    };
+    const iana = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return map[iana] || 'Russian Standard Time';
+  }
+
   // ─── получение canary-токена из cookies ──────────────────────────────────
   function getCanary() {
     const match = document.cookie.match(/X-OWA-CANARY=([^;]+)/);
     return match ? match[1] : null;
   }
 
-  // ─── запрос календаря через OWA service.svc ─────────────────────────────
-  function buildFindItemBody() {
-    const now = new Date();
-    const later = new Date(now.getTime() + CALENDAR_WINDOW_MIN * 60 * 1000);
+  // ─── запрос календаря через GetReminders (раскрывает периодические) ─────
+  function buildGetRemindersUrl() {
+    const later = new Date(Date.now() + CALENDAR_WINDOW_MIN * 60 * 1000);
+    const endTime = later.getFullYear() + '-' +
+      String(later.getMonth() + 1).padStart(2, '0') + '-' +
+      String(later.getDate()).padStart(2, '0') + 'T' +
+      String(later.getHours()).padStart(2, '0') + ':' +
+      String(later.getMinutes()).padStart(2, '0') + ':' +
+      String(later.getSeconds()).padStart(2, '0');
 
-    return JSON.stringify({
-      __type: 'FindItemJsonRequest:#Exchange',
+    const payload = {
+      __type: 'GetRemindersJsonRequest:#Exchange',
       Header: {
         __type: 'JsonRequestHeaders:#Exchange',
         RequestServerVersion: 'Exchange2013',
@@ -395,71 +428,41 @@
           __type: 'TimeZoneContext:#Exchange',
           TimeZoneDefinition: {
             __type: 'TimeZoneDefinitionType:#Exchange',
-            Id: 'Russian Standard Time',
+            Id: getWindowsTimeZone(),
           },
         },
       },
       Body: {
-        __type: 'FindItemRequest:#Exchange',
-        ItemShape: {
-          __type: 'ItemResponseShape:#Exchange',
-          BaseShape: 'IdOnly',
-          AdditionalProperties: [
-            { __type: 'PropertyUri:#Exchange', FieldURI: 'Subject' },
-            { __type: 'PropertyUri:#Exchange', FieldURI: 'Start' },
-            { __type: 'PropertyUri:#Exchange', FieldURI: 'End' },
-            { __type: 'PropertyUri:#Exchange', FieldURI: 'Location' },
-          ],
-        },
-        ParentFolderIds: [
-          { __type: 'DistinguishedFolderId:#Exchange', Id: 'calendar' },
-        ],
-        Traversal: 'Shallow',
-        CalendarView: {
-          __type: 'CalendarView:#Exchange',
-          StartDate: now.toISOString(),
-          EndDate: later.toISOString(),
-          MaxEntriesReturned: 50,
-        },
+        __type: 'GetRemindersRequest:#Exchange',
+        EndTime: endTime,
+        MaxItems: 0,
       },
-    });
+    };
+
+    return encodeURIComponent(JSON.stringify(payload));
   }
 
-  function parseServiceResponse(data) {
-    // service.svc возвращает JSON
+  function parseRemindersResponse(data) {
     const body = data?.Body;
     if (!body) throw new Error('Пустой ответ от сервера');
 
     if (body.ResponseClass === 'Error') {
-      throw new Error(body.MessageText || 'Ошибка FindItem');
+      throw new Error(body.MessageText || 'Ошибка GetReminders');
     }
 
-    const responseMessages = body.ResponseMessages?.Items;
-    if (!responseMessages || responseMessages.length === 0) {
-      throw new Error('Нет ResponseMessages в ответе');
-    }
-
-    const msg = responseMessages[0];
-    if (msg.ResponseClass === 'Error') {
-      throw new Error(msg.MessageText || 'Ошибка FindItem');
-    }
-
-    const items = msg.RootFolder?.Items || [];
+    const reminders = body.Reminders || [];
     const result = [];
-
     const now = new Date();
     const windowEnd = new Date(now.getTime() + CALENDAR_WINDOW_MIN * 60 * 1000);
 
-    for (const item of items) {
-      const id = item.ItemId?.Id;
-      const subject = item.Subject || '(без темы)';
-      const start = item.Start;
-      const end = item.End;
-      const location = item.Location || '';
-      const bodyText = item.Body?.Value || '';
+    for (const r of reminders) {
+      const id = r.ItemId?.Id;
+      const subject = r.Subject || '(без темы)';
+      const start = r.StartDate;
+      const end = r.EndDate;
+      const location = r.Location || '';
       if (!id || !start) continue;
 
-      // фильтр: событие ещё не закончилось и начинается в пределах окна
       const startDate = new Date(start);
       const endDate = new Date(end || start);
       if (endDate < now || startDate > windowEnd) continue;
@@ -473,31 +476,30 @@
 
   async function fetchCalendar() {
     const canary = getCanary();
-    if (!canary) {
-      throw new Error('X-OWA-CANARY не найден — перезагрузите OWA');
-    }
+    if (!canary) throw new Error('X-OWA-CANARY не найден — перезагрузите OWA');
 
-    const response = await fetch('/owa/service.svc?action=FindItem', {
+    const response = await fetch('/owa/service.svc?action=GetReminders&EP=1&ID=-11&AC=1', {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Action': 'FindItem',
+        'Content-Type': 'application/json; charset=UTF-8',
+        'Content-Length': '0',
+        'Action': 'GetReminders',
         'X-OWA-CANARY': canary,
-        'X-OWA-ActionName': 'OWANotifierFindItem',
+        'X-OWA-ActionName': 'GetRemindersAction',
+        'X-OWA-UrlPostData': buildGetRemindersUrl(),
+        'X-Requested-With': 'XMLHttpRequest',
       },
-      body: buildFindItemBody(),
+      body: '',
     });
 
     if (response.status === 401 || response.status === 440) {
       throw new Error('Сессия истекла — перезагрузите OWA');
     }
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
     const data = await response.json();
-    return parseServiceResponse(data);
+    return parseRemindersResponse(data);
   }
 
   // ─── GetItem: получить Body события для извлечения ссылки ──────────────
