@@ -410,14 +410,18 @@
   }
 
   // ─── запрос календаря через GetReminders (раскрывает периодические) ─────
+  function formatLocalDateTime(date) {
+    return date.getFullYear() + '-' +
+      String(date.getMonth() + 1).padStart(2, '0') + '-' +
+      String(date.getDate()).padStart(2, '0') + 'T' +
+      String(date.getHours()).padStart(2, '0') + ':' +
+      String(date.getMinutes()).padStart(2, '0') + ':' +
+      String(date.getSeconds()).padStart(2, '0');
+  }
+
   function buildGetRemindersUrl() {
-    const later = new Date(Date.now() + CALENDAR_WINDOW_MIN * 60 * 1000);
-    const endTime = later.getFullYear() + '-' +
-      String(later.getMonth() + 1).padStart(2, '0') + '-' +
-      String(later.getDate()).padStart(2, '0') + 'T' +
-      String(later.getHours()).padStart(2, '0') + ':' +
-      String(later.getMinutes()).padStart(2, '0') + ':' +
-      String(later.getSeconds()).padStart(2, '0');
+    const now = new Date();
+    const later = new Date(now.getTime() + CALENDAR_WINDOW_MIN * 60 * 1000);
 
     const payload = {
       __type: 'GetRemindersJsonRequest:#Exchange',
@@ -434,7 +438,9 @@
       },
       Body: {
         __type: 'GetRemindersRequest:#Exchange',
-        EndTime: endTime,
+        BeginTime: formatLocalDateTime(now),
+        EndTime: formatLocalDateTime(later),
+        ReminderType: 'All',
         MaxItems: 0,
       },
     };
@@ -604,6 +610,7 @@
   // ─── polling ────────────────────────────────────────────────────────────
   async function poll() {
     if (!isRunning) return;
+    lastPollTime = Date.now();
     setStatus('Проверяю календарь...', 'active');
 
     try {
@@ -618,20 +625,20 @@
 
       for (const event of events) {
         const startTime = new Date(event.start);
-        const minutesLeft = (startTime - now) / 60000;
+        const secondsLeft = (startTime - now) / 1000;
 
-        // обогащаем ссылкой на встречу только события в пределах 15 мин
-        if (minutesLeft <= NOTIFY_BEFORE_MIN && minutesLeft > 0) {
+        // обогащаем ссылкой на встречу только события в пределах ~16 мин
+        if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > 0) {
           await enrichEventWithMeetingUrl(event);
         }
 
-        if (minutesLeft <= NOTIFY_BEFORE_MIN && minutesLeft > 0 && !notifiedEventIds.has(event.id)) {
+        if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > 0 && !notifiedEventIds.has(event.id)) {
           notifiedEventIds.add(event.id);
-          const minText = Math.round(minutesLeft);
-          addLog(`Встреча через ${minText} мин: ${event.subject}`, 'new');
+          const timeStr = startTime.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+          addLog(`Встреча в ${timeStr}: ${event.subject}`, 'new');
           showNotification(
             event.subject,
-            `${event.location ? event.location + (event.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (event.meetingUrl ? event.meetingUrl.slice(0, 50) + (event.meetingUrl.length > 50 ? '...' : '') + '\n' : '')}Через ${minText} мин`,
+            `${event.location ? event.location + (event.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (event.meetingUrl ? event.meetingUrl.length > 40 ? event.meetingUrl.slice(0, 37) + '...' : event.meetingUrl + '\n' : '')}Начало в ${timeStr}`,
             event.meetingUrl
           );
           notifiedThisRound++;
@@ -646,7 +653,7 @@
             addLog(`Встреча через 5 сек: ${ev.subject}`, 'new');
             showNotification(
               ev.subject,
-              `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.slice(0, 50) + (ev.meetingUrl.length > 50 ? '...' : '') + '\n' : '')}Начинается!`,
+              `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.length > 40 ? ev.meetingUrl.slice(0, 37) + '...' : ev.meetingUrl + '\n' : '')}Начинается!`,
               ev.meetingUrl
             );
           }, msUntilImminent);
@@ -686,6 +693,31 @@
       pollTimer = setTimeout(poll, POLL_INTERVAL);
     }
   }
+
+  // ─── пробуждение: проверка при выходе из сна/блокировки ─────────────────
+  let lastPollTime = Date.now();
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && isRunning) {
+      const elapsed = Date.now() - lastPollTime;
+      if (elapsed > POLL_INTERVAL * 1.5) {
+        addLog(`Пробуждение после ${Math.round(elapsed / 60000)} мин — проверяю`, 'warn');
+        clearTimeout(pollTimer);
+        poll();
+      }
+    }
+  });
+
+  // fallback: setInterval ловит случаи когда visibilitychange не сработал
+  setInterval(() => {
+    if (!isRunning) return;
+    const elapsed = Date.now() - lastPollTime;
+    if (elapsed > POLL_INTERVAL * 2) {
+      addLog(`Пропущен поллинг (${Math.round(elapsed / 60000)} мин) — проверяю`, 'warn');
+      clearTimeout(pollTimer);
+      poll();
+    }
+  }, 5000);
 
   function startPolling() {
     if (isRunning) return;
