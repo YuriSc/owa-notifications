@@ -438,9 +438,7 @@
       },
       Body: {
         __type: 'GetRemindersRequest:#Exchange',
-        BeginTime: formatLocalDateTime(now),
         EndTime: formatLocalDateTime(later),
-        ReminderType: 'All',
         MaxItems: 0,
       },
     };
