@@ -21,6 +21,7 @@
   let pollTimer = null;
   const notifiedEventIds = new Set();
   const imminentTimers = new Map(); // eventId → timerId для 5-секундных напоминаний
+  const threeMinTimers = new Map(); // eventId → timerId для 3-минутных напоминаний
   let notifCount = 0;
   let eventCount = 0;
   let isCollapsed = true;
@@ -640,9 +641,10 @@
           await enrichEventWithMeetingUrl(event);
         }
 
+        const timeStr = startTime.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
         if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > 0 && !notifiedEventIds.has(event.id)) {
           notifiedEventIds.add(event.id);
-          const timeStr = startTime.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
           addLog(`Встреча в ${timeStr}: ${event.subject}`, 'new');
           showNotification(
             event.subject,
@@ -652,13 +654,29 @@
           notifiedThisRound++;
         }
 
-        // запланировать напоминание за 5 секунд до начала
-        const msUntilImminent = (startTime - now) - 5000;
+        // запланировать напоминание за 5 минут до начала
+        const msUntil5min = (startTime - now) - 5 * 60 * 1000;
+        if (msUntil5min > 0 && msUntil5min < POLL_INTERVAL * 2 && !threeMinTimers.has(event.id)) {
+          const ev = event;
+          const timerId3 = setTimeout(() => {
+            threeMinTimers.delete(ev.id);
+            addLog(`Встреча через 5 мин: ${ev.subject}`, 'new');
+            showNotification(
+              ev.subject,
+              `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.length > 40 ? ev.meetingUrl.slice(0, 37) + '...' : ev.meetingUrl + '\n' : '')}Начало в ${timeStr}`,
+              ev.meetingUrl
+            );
+          }, msUntil5min);
+          threeMinTimers.set(event.id, timerId3);
+        }
+
+        // запланировать напоминание за 1 минуту до начала
+        const msUntilImminent = (startTime - now) - 60 * 1000;
         if (msUntilImminent > 0 && msUntilImminent < POLL_INTERVAL * 2 && !imminentTimers.has(event.id)) {
           const ev = event;
           const timerId = setTimeout(() => {
             imminentTimers.delete(ev.id);
-            addLog(`Встреча через 5 сек: ${ev.subject}`, 'new');
+            addLog(`Встреча через 1 мин: ${ev.subject}`, 'new');
             showNotification(
               ev.subject,
               `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.length > 40 ? ev.meetingUrl.slice(0, 37) + '...' : ev.meetingUrl + '\n' : '')}Начинается!`,
@@ -743,6 +761,8 @@
     clearTimeout(pollTimer);
     for (const timerId of imminentTimers.values()) clearTimeout(timerId);
     imminentTimers.clear();
+    for (const timerId of threeMinTimers.values()) clearTimeout(timerId);
+    threeMinTimers.clear();
     addLog('Мониторинг остановлен', 'warn');
     setStatus('Остановлен', '');
     setDot('');
