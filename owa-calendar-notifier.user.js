@@ -462,16 +462,26 @@
     for (const r of reminders) {
       const id = r.ItemId?.Id;
       const subject = r.Subject || '(без темы)';
-      const start = r.StartDate;
-      const end = r.EndDate;
       const location = r.Location || '';
-      if (!id || !start) continue;
+      if (!id || !r.StartDate) continue;
 
-      const startDate = new Date(start);
-      const endDate = new Date(end || start);
+      let startDate = new Date(r.StartDate);
+      let endDate = new Date(r.EndDate || r.StartDate);
+      const reminderDate = new Date(r.ReminderTime || r.StartDate);
+
+      // Баг Exchange: для некоторых периодических встреч StartDate/EndDate
+      // указывают на прошлое вхождение, а ReminderTime — на актуальное.
+      // Если расхождение > 24ч, пересчитываем даты от ReminderTime.
+      if (reminderDate - startDate > 24 * 60 * 60 * 1000) {
+        const duration = endDate - startDate;
+        // По умолчанию напоминание за 15 мин до начала
+        startDate = new Date(reminderDate.getTime() + 15 * 60 * 1000);
+        endDate = new Date(startDate.getTime() + duration);
+      }
+
       if (endDate < now || startDate > windowEnd) continue;
 
-      result.push({ id, subject, start, end, location, meetingUrl: null });
+      result.push({ id, subject, start: startDate.toISOString(), end: endDate.toISOString(), location, meetingUrl: null });
     }
 
     result.sort((a, b) => new Date(a.start) - new Date(b.start));
