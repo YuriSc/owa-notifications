@@ -14,7 +14,7 @@
   // ─── настройки ──────────────────────────────────────────────────────────
   const POLL_INTERVAL = 30_000;   // 30 секунд
   const NOTIFY_BEFORE_MIN = 15;   // уведомлять за 15 мин до начала
-  const CALENDAR_WINDOW_MIN = 60; // окно просмотра — 60 мин вперёд
+  const FOLDER_ID_STORAGE_KEY = 'owa-notifier-calendar-folder-id';
 
   // ─── состояние ──────────────────────────────────────────────────────────
   let isRunning = false;
@@ -28,6 +28,8 @@
   let firstErrorTime = null;
   const DISCONNECT_TIMEOUT = 5 * 60 * 1000; // 5 минут
   let disconnectNotified = false;
+  let isFirstPoll = true; // при первом успешном poll уведомляем о встречах, начавшихся ≤ 10 мин назад
+  const RECENTLY_STARTED_SEC = 10 * 60;
 
   // ─── UI: floating-виджет ────────────────────────────────────────────────
   function createWidget() {
@@ -283,6 +285,34 @@
     return div.innerHTML;
   }
 
+  function pluralMeetings(n) {
+    const m10 = n % 10;
+    const m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return 'встреча';
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return 'встречи';
+    return 'встреч';
+  }
+
+  // компактный лейбл места: для URL — hostname, для текста — обрезка
+  function shortLocationLabel(text, max = 40) {
+    if (!text) return '';
+    try {
+      const u = new URL(text);
+      return u.hostname;
+    } catch (e) {
+      return text.length > max ? text.slice(0, max - 1) + '…' : text;
+    }
+  }
+
+  function buildNotificationBody(event, suffix) {
+    const lines = [];
+    const label = event.location || event.meetingUrl;
+    if (label) lines.push(shortLocationLabel(label));
+    if (event.meetingUrl) lines.push('Нажмите чтобы присоединиться');
+    if (suffix) lines.push(suffix);
+    return lines.join('\n');
+  }
+
   // ─── уведомления ────────────────────────────────────────────────────────
   async function requestNotificationPermission() {
     if (!('Notification' in window)) {
@@ -410,7 +440,7 @@
     return match ? match[1] : null;
   }
 
-  // ─── запрос календаря через GetReminders (раскрывает периодические) ─────
+  // ─── запрос календаря через GetCalendarView ─────────────────────────────
   function formatLocalDateTime(date) {
     return date.getFullYear() + '-' +
       String(date.getMonth() + 1).padStart(2, '0') + '-' +
@@ -420,15 +450,95 @@
       String(date.getSeconds()).padStart(2, '0');
   }
 
-  function buildGetRemindersUrl() {
-    const now = new Date();
-    const later = new Date(now.getTime() + CALENDAR_WINDOW_MIN * 60 * 1000);
+  function getDayEnd() {
+    const d = new Date();
+    d.setHours(23, 59, 59, 999);
+    return d;
+  }
 
-    const payload = {
-      __type: 'GetRemindersJsonRequest:#Exchange',
+  // FolderId календаря получаем через GetFolder(DistinguishedFolderId: 'calendar') один раз и кэшируем
+  let calendarFolderRef = null;
+
+  async function getCalendarFolderRef() {
+    if (calendarFolderRef) return calendarFolderRef;
+
+    const cached = localStorage.getItem(FOLDER_ID_STORAGE_KEY);
+    if (cached) {
+      try {
+        calendarFolderRef = JSON.parse(cached);
+        return calendarFolderRef;
+      } catch (e) { /* кэш повреждён, перезапросим */ }
+    }
+
+    const canary = getCanary();
+    if (!canary) throw new Error('X-OWA-CANARY не найден — перезагрузите OWA');
+
+    const payload = JSON.stringify({
+      __type: 'GetFolderJsonRequest:#Exchange',
       Header: {
         __type: 'JsonRequestHeaders:#Exchange',
         RequestServerVersion: 'Exchange2013',
+      },
+      Body: {
+        __type: 'GetFolderRequest:#Exchange',
+        FolderShape: {
+          __type: 'FolderResponseShape:#Exchange',
+          BaseShape: 'IdOnly',
+        },
+        FolderIds: [
+          { __type: 'DistinguishedFolderId:#Exchange', Id: 'calendar' },
+        ],
+      },
+    });
+
+    const response = await fetch('/owa/service.svc?action=GetFolder', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'Action': 'GetFolder',
+        'X-OWA-CANARY': canary,
+        'X-OWA-ActionName': 'OWANotifierGetFolder',
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: payload,
+    });
+
+    if (response.status === 401 || response.status === 440) {
+      throw new Error('Сессия истекла — перезагрузите OWA');
+    }
+    if (!response.ok) throw new Error(`GetFolder HTTP ${response.status}`);
+
+    const data = await response.json();
+    const messages = data?.Body?.ResponseMessages?.Items;
+    const msg = messages?.[0];
+    if (!msg || msg.ResponseClass === 'Error') {
+      throw new Error(msg?.MessageText || 'Не удалось получить FolderId календаря');
+    }
+    const folder = msg.Folders?.[0];
+    if (!folder?.FolderId?.Id) {
+      throw new Error('FolderId календаря отсутствует в ответе');
+    }
+
+    calendarFolderRef = {
+      Id: folder.FolderId.Id,
+      ChangeKey: folder.FolderId.ChangeKey,
+    };
+    localStorage.setItem(FOLDER_ID_STORAGE_KEY, JSON.stringify(calendarFolderRef));
+    return calendarFolderRef;
+  }
+
+  function buildGetCalendarViewUrl(folderRef) {
+    const now = new Date();
+    // RangeStart сдвинут назад, чтобы захватить встречи, начавшиеся ≤ RECENTLY_STARTED_SEC назад
+    const rangeStart = new Date(now.getTime() - RECENTLY_STARTED_SEC * 1000);
+    const dayEnd = getDayEnd();
+
+    const payload = {
+      __type: 'GetCalendarViewJsonRequest:#Exchange',
+      Header: {
+        __type: 'JsonRequestHeaders:#Exchange',
+        RequestServerVersion: 'V2017_08_18',
         TimeZoneContext: {
           __type: 'TimeZoneContext:#Exchange',
           TimeZoneDefinition: {
@@ -438,51 +548,68 @@
         },
       },
       Body: {
-        __type: 'GetRemindersRequest:#Exchange',
-        EndTime: formatLocalDateTime(later),
-        MaxItems: 0,
+        __type: 'GetCalendarViewRequest:#Exchange',
+        ItemShape: {
+          __type: 'ItemResponseShape:#Exchange',
+          BaseShape: 'IdOnly',
+          AdditionalProperties: [
+            { __type: 'PropertyUri:#Exchange', FieldURI: 'item:Subject' },
+            { __type: 'PropertyUri:#Exchange', FieldURI: 'calendar:Start' },
+            { __type: 'PropertyUri:#Exchange', FieldURI: 'calendar:End' },
+            { __type: 'PropertyUri:#Exchange', FieldURI: 'calendar:Location' },
+            { __type: 'PropertyUri:#Exchange', FieldURI: 'calendar:IsAllDayEvent' },
+          ],
+        },
+        CalendarId: {
+          __type: 'TargetFolderId:#Exchange',
+          BaseFolderId: {
+            __type: 'FolderId:#Exchange',
+            Id: folderRef.Id,
+            ChangeKey: folderRef.ChangeKey,
+          },
+        },
+        RangeStart: formatLocalDateTime(rangeStart) + '.001',
+        RangeEnd: formatLocalDateTime(dayEnd) + '.000',
       },
     };
 
     return encodeURIComponent(JSON.stringify(payload));
   }
 
-  function parseRemindersResponse(data) {
+  function parseCalendarViewResponse(data) {
     const body = data?.Body;
-    if (!body) throw new Error('Пустой ответ от сервера');
-
+    if (!body) throw new Error('Пустой ответ от GetCalendarView');
     if (body.ResponseClass === 'Error') {
-      throw new Error(body.MessageText || 'Ошибка GetReminders');
+      throw new Error(body.MessageText || body.ResponseCode || 'Ошибка GetCalendarView');
     }
 
-    const reminders = body.Reminders || [];
+    // OWA 2019 возвращает встречи напрямую в Body.Items (без обёртки ResponseMessages/RootFolder)
+    const items = body.Items || body.ResponseMessages?.Items?.[0]?.RootFolder?.Items || [];
     const result = [];
     const now = new Date();
-    const windowEnd = new Date(now.getTime() + CALENDAR_WINDOW_MIN * 60 * 1000);
 
-    for (const r of reminders) {
-      const id = r.ItemId?.Id;
-      const subject = r.Subject || '(без темы)';
-      const location = r.Location || '';
-      if (!id || !r.StartDate) continue;
+    for (const item of items) {
+      const id = item.ItemId?.Id;
+      if (!id || !item.Start) continue;
+      if (item.IsAllDayEvent || item.IsCancelled) continue;
 
-      let startDate = new Date(r.StartDate);
-      let endDate = new Date(r.EndDate || r.StartDate);
-      const reminderDate = new Date(r.ReminderTime || r.StartDate);
+      const startDate = new Date(item.Start);
+      const endDate = new Date(item.End || item.Start);
+      if (endDate < now) continue;
 
-      // Баг Exchange: для некоторых периодических встреч StartDate/EndDate
-      // указывают на прошлое вхождение, а ReminderTime — на актуальное.
-      // Если расхождение > 24ч, пересчитываем даты от ReminderTime.
-      if (reminderDate - startDate > 24 * 60 * 60 * 1000) {
-        const duration = endDate - startDate;
-        // По умолчанию напоминание за 15 мин до начала
-        startDate = new Date(reminderDate.getTime() + 15 * 60 * 1000);
-        endDate = new Date(startDate.getTime() + duration);
-      }
+      // Location в OWA 2019 — объект с DisplayName, в более старых API — строка
+      const location = typeof item.Location === 'string'
+        ? item.Location
+        : (item.Location?.DisplayName || '');
 
-      if (endDate < now || startDate > windowEnd) continue;
-
-      result.push({ id, subject, start: startDate.toISOString(), end: endDate.toISOString(), location, meetingUrl: null });
+      result.push({
+        id,
+        subject: item.Subject || '(без темы)',
+        start: startDate.toISOString(),
+        end: endDate.toISOString(),
+        location,
+        meetingUrl: null,
+      });
     }
 
     result.sort((a, b) => new Date(a.start) - new Date(b.start));
@@ -493,16 +620,18 @@
     const canary = getCanary();
     if (!canary) throw new Error('X-OWA-CANARY не найден — перезагрузите OWA');
 
-    const response = await fetch('/owa/service.svc?action=GetReminders&EP=1&ID=-11&AC=1', {
+    const folderRef = await getCalendarFolderRef();
+
+    const response = await fetch('/owa/service.svc?action=GetCalendarView&EP=1&ID=-1&AC=1', {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json; charset=UTF-8',
         'Content-Length': '0',
-        'Action': 'GetReminders',
+        'Action': 'GetCalendarView',
         'X-OWA-CANARY': canary,
-        'X-OWA-ActionName': 'GetRemindersAction',
-        'X-OWA-UrlPostData': buildGetRemindersUrl(),
+        'X-OWA-ActionName': 'OWANotifierGetCalendarView',
+        'X-OWA-UrlPostData': buildGetCalendarViewUrl(folderRef),
         'X-Requested-With': 'XMLHttpRequest',
       },
       body: '',
@@ -514,7 +643,7 @@
     if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
     const data = await response.json();
-    return parseRemindersResponse(data);
+    return parseCalendarViewResponse(data);
   }
 
   // ─── GetItem: получить Body события для извлечения ссылки ──────────────
@@ -636,21 +765,28 @@
         const startTime = new Date(event.start);
         const secondsLeft = (startTime - now) / 1000;
 
-        // обогащаем ссылкой на встречу только события в пределах ~16 мин
-        if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > 0) {
+        // обогащаем ссылкой: встречи в пределах ~16 мин впереди или начавшиеся ≤ 10 мин назад
+        if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > -RECENTLY_STARTED_SEC) {
           await enrichEventWithMeetingUrl(event);
         }
 
         const timeStr = startTime.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
+        // при первом poll: встреча уже идёт ≤ 10 мин — догоняющее уведомление
+        if (isFirstPoll && secondsLeft <= 0 && secondsLeft > -RECENTLY_STARTED_SEC && !notifiedEventIds.has(event.id)) {
+          notifiedEventIds.add(event.id);
+          const minAgo = Math.round(-secondsLeft / 60);
+          const ago = minAgo <= 0 ? 'только что' : `${minAgo} мин`;
+          addLog(`Уже идёт (${ago}): ${event.subject}`, 'new');
+          showNotification(event.subject, buildNotificationBody(event, `Уже идёт ${ago}`), event.meetingUrl);
+          notifiedThisRound++;
+          continue;
+        }
+
         if (secondsLeft <= NOTIFY_BEFORE_MIN * 60 + 59 && secondsLeft > 0 && !notifiedEventIds.has(event.id)) {
           notifiedEventIds.add(event.id);
           addLog(`Встреча в ${timeStr}: ${event.subject}`, 'new');
-          showNotification(
-            event.subject,
-            `${event.location ? event.location + (event.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (event.meetingUrl ? event.meetingUrl.length > 40 ? event.meetingUrl.slice(0, 37) + '...' : event.meetingUrl + '\n' : '')}Начало в ${timeStr}`,
-            event.meetingUrl
-          );
+          showNotification(event.subject, buildNotificationBody(event, `Начало в ${timeStr}`), event.meetingUrl);
           notifiedThisRound++;
         }
 
@@ -661,11 +797,7 @@
           const timerId3 = setTimeout(() => {
             threeMinTimers.delete(ev.id);
             addLog(`Встреча через 5 мин: ${ev.subject}`, 'new');
-            showNotification(
-              ev.subject,
-              `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.length > 40 ? ev.meetingUrl.slice(0, 37) + '...' : ev.meetingUrl + '\n' : '')}Начало в ${timeStr}`,
-              ev.meetingUrl
-            );
+            showNotification(ev.subject, buildNotificationBody(ev, `Начало в ${timeStr}`), ev.meetingUrl);
           }, msUntil5min);
           threeMinTimers.set(event.id, timerId3);
         }
@@ -677,23 +809,21 @@
           const timerId = setTimeout(() => {
             imminentTimers.delete(ev.id);
             addLog(`Встреча через 1 мин: ${ev.subject}`, 'new');
-            showNotification(
-              ev.subject,
-              `${ev.location ? ev.location + (ev.meetingUrl ? '\nНажмите чтобы присоединиться' : '') + '\n' : (ev.meetingUrl ? ev.meetingUrl.length > 40 ? ev.meetingUrl.slice(0, 37) + '...' : ev.meetingUrl + '\n' : '')}Начинается!`,
-              ev.meetingUrl
-            );
+            showNotification(ev.subject, buildNotificationBody(ev, 'Начинается!'), ev.meetingUrl);
           }, msUntilImminent);
           imminentTimers.set(event.id, timerId);
         }
       }
 
       if (notifiedThisRound === 0) {
-        addLog(`Встреч в ближайший час: ${events.length}`);
+        addLog(`Сегодня осталось: ${events.length} ${pluralMeetings(events.length)}`);
       }
 
-      setStatus(`Активен · ${events.length} встреч · ${new Date().toLocaleTimeString('ru-RU')}`, 'active');
+      const nowStr = new Date().toLocaleTimeString('ru-RU');
+      setStatus(`Активен · осталось ${events.length} ${pluralMeetings(events.length)} · ${nowStr}`, 'active');
       firstErrorTime = null;
       disconnectNotified = false;
+      isFirstPoll = false;
     } catch (e) {
       if (!firstErrorTime) firstErrorTime = new Date();
       const errorDuration = Math.round((new Date() - firstErrorTime) / 60000);
@@ -748,6 +878,7 @@
   function startPolling() {
     if (isRunning) return;
     isRunning = true;
+    isFirstPoll = true;
     notifiedEventIds.clear();
     addLog('Мониторинг запущен', 'new');
     setStatus('Запускаю...', 'active');
